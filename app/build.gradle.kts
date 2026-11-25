@@ -322,10 +322,11 @@ android {
     buildConfigField("boolean", "LINK_DEVICE_UX_ENABLED", "false")
 
     val arm64Only = project.hasProperty("arm64Only")
-    val targetAbis = if (arm64Only) listOf("arm64-v8a") else listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
 
-    ndk {
-      abiFilters += targetAbis
+    if (!arm64Only) {
+      ndk {
+        abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+      }
     }
     resourceConfigurations += listOf()
 
@@ -333,8 +334,13 @@ android {
       abi {
         isEnable = !project.hasProperty("generateBaselineProfile")
         reset()
-        include(*targetAbis.toTypedArray())
-        isUniversalApk = !arm64Only
+        if (arm64Only) {
+          include("arm64-v8a")
+          isUniversalApk = false
+        } else {
+          include("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+          isUniversalApk = true
+        }
       }
     }
 
