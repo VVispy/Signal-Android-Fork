@@ -321,8 +321,11 @@ android {
     buildConfigField("boolean", "TRACING_ENABLED", "false")
     buildConfigField("boolean", "LINK_DEVICE_UX_ENABLED", "false")
 
+    val arm64Only = project.hasProperty("arm64Only")
+    val targetAbis = if (arm64Only) listOf("arm64-v8a") else listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+
     ndk {
-      abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+      abiFilters += targetAbis
     }
     resourceConfigurations += listOf()
 
@@ -330,8 +333,8 @@ android {
       abi {
         isEnable = !project.hasProperty("generateBaselineProfile")
         reset()
-        include("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
-        isUniversalApk = true
+        include(*targetAbis.toTypedArray())
+        isUniversalApk = !arm64Only
       }
     }
 
@@ -467,6 +470,7 @@ android {
 
     create("github") {
       dimension = "distribution"
+      applicationIdSuffix = ".wispy"
       buildConfigField("boolean", "MANAGES_APP_UPDATES", "false")
       buildConfigField("String", "APK_UPDATE_MANIFEST_URL", "null")
       buildConfigField("String", "BUILD_DISTRIBUTION_TYPE", "\"github\"")

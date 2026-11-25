@@ -1,0 +1,130 @@
+name: Release Wispy APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Optional GitHub Release tag (leave blank to auto-generate from version + commit)"
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /usr/local/julia*
+          sudo rm -rf /usr/local/share/chromium
+          sudo rm -rf /opt/microsoft /opt/google /opt/az
+          sudo rm -rf /usr/local/share/powershell
+          df -h
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          lfs: true
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Install required Android SDK / NDK components
+        run: |
+          SDK_ROOT="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" \
+            "platforms;android-37" \
+            "build-tools;36.0.0" \
+            "ndk;28.0.13004108"
+
+      - name: Validate Gradle Wrapper
+        uses: gradle/actions/wrapper-validation@3f131e8634966bd73d06cc69884922b02e6faf92 # v6
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6
+
+      - name: Build arm64-v8a release APK
+        run: |
+          ./gradlew assembleGithubProdRelease \
+            -Parm64Only \
+            --console=plain \
+            --no-daemon \
+            -Dorg.gradle.jvmargs="-Xmx8g -Xms256m -XX:MaxMetaspaceSize=1g" \
+            -Dkotlin.daemon.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=512m"
+
+      - name: Sign APK
+        id: sign
+        env:
+          KEYSTORE_BASE64: ${{ secrets.WISPY_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.WISPY_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.WISPY_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.WISPY_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          BUILD_TOOLS="$SDK_ROOT/build-tools/36.0.0"
+
+          APK_IN=$(find app/build/outputs/apk/githubProd/release -maxdepth 1 -name '*arm64-v8a*.apk' | head -n 1)
+          if [ -z "$APK_IN" ]; then
+            echo "No arm64-v8a APK found!" >&2
+            ls -la app/build/outputs/apk/githubProd/release || true
+            exit 1
+          fi
+
+          mkdir -p out
+          BASENAME=$(basename "$APK_IN" | sed 's/-unsigned//')
+          ALIGNED="out/aligned.apk"
+          SIGNED="out/$BASENAME"
+
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/wispy.keystore"
+
+          "$BUILD_TOOLS/zipalign" -p -f 4 "$APK_IN" "$ALIGNED"
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks "$RUNNER_TEMP/wispy.keystore" \
+            --ks-key-alias "$KEY_ALIAS" \
+            --ks-pass env:KEYSTORE_PASSWORD \
+            --key-pass env:KEY_PASSWORD \
+            --out "$SIGNED" \
+            "$ALIGNED"
+
+          "$BUILD_TOOLS/apksigner" verify --verbose "$SIGNED"
+          rm -f "$ALIGNED"
+
+          (cd out && sha256sum "$BASENAME" > "$BASENAME.sha256")
+          echo "apk_path=$SIGNED" >> "$GITHUB_OUTPUT"
+          echo "sha_path=$SIGNED.sha256" >> "$GITHUB_OUTPUT"
+          echo "apk_name=$BASENAME" >> "$GITHUB_OUTPUT"
+
+      - name: Clean up keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/wispy.keystore"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ inputs.release_tag }}
+          APK_PATH: ${{ steps.sign.outputs.apk_path }}
+          SHA_PATH: ${{ steps.sign.outputs.sha_path }}
+          APK_NAME: ${{ steps.sign.outputs.apk_name }}
+        run: |
+          set -euo pipefail
+          VERSION=$(grep -oP 'val canonicalVersionName = "\K[^"]+' app/build.gradle.kts)
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          TAG="${INPUT_TAG:-v${VERSION}-wispy-${SHORT_SHA}-r${GITHUB_RUN_NUMBER}}"
+
+          gh release create "$TAG" "$APK_PATH" "$SHA_PATH" \
+            --title "Signal Wispy $VERSION ($SHORT_SHA)" \
+            --notes "Signed arm64-v8a release APK built from \`${GITHUB_REF_NAME}\` (\`${SHORT_SHA}\`) with package ID \`org.thoughtcrime.securesms.wispy\`."
